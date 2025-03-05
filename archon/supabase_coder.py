@@ -281,4 +281,13 @@ async def get_page_content(ctx: RunContext[SupabaseDeps], url: str) -> str:
         return f"# Documentation: {url}\n\n" + "\n".join(full_content)
     
     except Exception as e:
-        return f"Error retrieving page content: {str(e)}" 
+        return f"Error retrieving page content: {str(e)}"
+
+def get_main_prompt() -> str:
+    """
+    Returns the main system prompt for the Supabase Coder.
+    
+    Returns:
+        str: The system prompt for the Supabase Coder
+    """
+    return system_prompt 

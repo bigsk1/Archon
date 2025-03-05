@@ -57,11 +57,13 @@ from archon.base_crawler import (
 # Using the wrong parameter name can cause "multiple values for keyword argument" errors.
 
 # Define the source name for this crawler
-# CHANGE THIS: Replace with your crawler name, e.g., "fastapi_docs"
-SOURCE_NAME = "supabase_docs"
+# IMPORTANT: This name MUST match your file name without the "crawl_" prefix and "_docs" suffix
+# Example: For file "crawl_fastapi_docs.py", use SOURCE_NAME = "fastapi_docs"
+# This ensures auto-discovery works correctly and avoids registry issues
+SOURCE_NAME = "name_docs"
 
 # CHANGE THIS: Replace with the base URL for the documentation
-BASE_URL = "https://supabase.com"
+BASE_URL = "https://REPLACE_WITH_YOUR_DOCS_DOMAIN.com"
 
 def get_urls_to_crawl(url_limit: int = 50) -> List[str]:
     """Get all documentation URLs to crawl.
@@ -80,14 +82,10 @@ def get_urls_to_crawl(url_limit: int = 50) -> List[str]:
     # CUSTOMIZE: Define site-specific fallback URLs to use if sitemap fails
     # These should point to important landing pages for the documentation
     fallback_urls = [
-        f"{BASE_URL}/docs/guides/getting-started",
-        f"{BASE_URL}/docs/guides/database",
-        f"{BASE_URL}/docs/guides/auth",
-        f"{BASE_URL}/docs/guides/storage",
-        f"{BASE_URL}/docs/guides/api",
-        f"{BASE_URL}/docs/guides/functions",
-        f"{BASE_URL}/docs/guides/realtime",
-        f"{BASE_URL}/docs/guides/resources",
+        f"{BASE_URL}/docs/introduction",
+        f"{BASE_URL}/docs/getting-started",
+        f"{BASE_URL}/docs/guides/basic-usage",
+        # Add more URLs as needed
     ]
     
     # Function to extract URLs from a sitemap - this handles both direct sitemaps and sitemap indexes
@@ -133,31 +131,29 @@ def get_urls_to_crawl(url_limit: int = 50) -> List[str]:
             # If this is a sitemap index, recursively fetch all sitemaps
             all_page_urls = []
             if sitemap_urls:
-                print(f"Found {len(sitemap_urls)} nested sitemaps in {sitemap_url}")
-                for nested_sitemap in sitemap_urls:
+                print(f"Found sitemap index with {len(sitemap_urls)} child sitemaps")
+                for child_sitemap_url in sitemap_urls:
                     # CUSTOMIZE: Filter which nested sitemaps to process based on your site's structure
-                    # For example, only process docs-related sitemaps
-                    if '/docs/' in nested_sitemap or 'docs' in nested_sitemap or 'guides' in nested_sitemap or 'reference' in nested_sitemap:
-                        nested_urls = extract_urls_from_sitemap(nested_sitemap, namespace, depth + 1, max_depth)
-                        all_page_urls.extend(nested_urls)
+                    # Example: Skip certain sitemaps that aren't relevant to documentation
+                    # if "blog" in child_sitemap_url or "news" in child_sitemap_url:
+                    #     continue
+                    
+                    child_urls = extract_urls_from_sitemap(child_sitemap_url, namespace, depth + 1, max_depth)
+                    all_page_urls.extend(child_urls)
+                return all_page_urls
             
-            # Also check for direct URLs in this sitemap
+            # If this is a regular sitemap (not an index), extract page URLs
             page_urls = []
-            for url in root.findall(f".//{namespace}url"):
-                loc_element = url.find(f"{namespace}loc")
+            for url_element in root.findall(f".//{namespace}url"):
+                loc_element = url_element.find(f"{namespace}loc")
                 if loc_element is not None and loc_element.text:
                     page_urls.append(loc_element.text)
             
-            print(f"Found {len(page_urls)} direct page URLs in {sitemap_url}")
-            all_page_urls.extend(page_urls)
+            if page_urls:
+                print(f"Found {len(page_urls)} direct page URLs in {sitemap_url}")
             
-            return all_page_urls
-        except requests.exceptions.Timeout:
-            print(f"Timeout while fetching sitemap {sitemap_url}")
-            return []
-        except requests.exceptions.ConnectionError:
-            print(f"Connection error while fetching sitemap {sitemap_url}")
-            return []
+            return page_urls
+            
         except Exception as e:
             print(f"Error processing sitemap {sitemap_url}: {e}")
             return []
@@ -168,6 +164,9 @@ def get_urls_to_crawl(url_limit: int = 50) -> List[str]:
         "/docs/sitemap.xml",
         "/sitemap-0.xml",
         "/sitemap_docs.xml",
+        "/sitemap_index.xml",
+        "/latest/sitemap.xml",  # For sites with versioned docs like Pydantic
+        "",  # For when the base URL itself is the sitemap
     ]
     
     # CUSTOMIZE: Add or remove sitemap paths specific to your documentation site
@@ -194,12 +193,30 @@ def get_urls_to_crawl(url_limit: int = 50) -> List[str]:
     # Modify these filters based on your site's URL structure
     filtered_urls = []
     for url in all_urls:
-        # Include URLs with /docs/ path and exclude any unnecessary pages
-        if '/docs/' in url and not any(exclude in url for exclude in [
-            '/archive/', 
-            '/legacy/',
-            '/draft/',
+        # This is a more flexible approach to filtering documentation URLs
+        # It handles various common documentation URL patterns
+        
+        # Skip URLs that are clearly not documentation
+        if any(exclude in url.lower() for exclude in [
+            '/blog/', '/news/', '/archive/', '/legacy/', '/draft/', 
+            '/community/', '/forum/', '/download/', '/releases/'
         ]):
+            continue
+            
+        # Include URLs that match common documentation patterns
+        base_domain = BASE_URL.split('//')[1].split('/')[0]  # Extract domain without protocol and path
+        if (
+            # Standard docs path
+            '/docs/' in url or 
+            # API reference paths
+            '/api/' in url or '/reference/' in url or
+            # Guide/tutorial paths
+            '/guide/' in url or '/tutorial/' in url or
+            # For sites with versioned docs (like Pydantic)
+            '/latest/' in url or '/stable/' in url or '/current/' in url or
+            # For sites with docs directly at the root (check if it's from our domain)
+            base_domain in url
+        ):
             filtered_urls.append(url)
     
     # Deduplicate URLs while preserving order
@@ -212,12 +229,11 @@ def get_urls_to_crawl(url_limit: int = 50) -> List[str]:
     
     print(f"After filtering and deduplication: {len(unique_urls)} unique documentation URLs")
     
-    # Apply URL limit if specified and needed
-    if effective_limit < len(unique_urls):
-        print(f"Limiting URLs from {len(unique_urls)} to {effective_limit}")
-        return unique_urls[:effective_limit]
+    # Apply URL limit if specified
+    if url_limit > 0 and len(unique_urls) > url_limit:
+        print(f"Limiting to {url_limit} URLs (from {len(unique_urls)} total)")
+        return unique_urls[:url_limit]
     
-    print(f"Found {len(unique_urls)} URLs to crawl")
     return unique_urls
 
 async def process_url_with_requests(url: str, tracker: Optional[CrawlProgressTracker] = None) -> Optional[str]:

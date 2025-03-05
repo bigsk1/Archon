@@ -57,11 +57,13 @@ from archon.base_crawler import (
 # Using the wrong parameter name can cause "multiple values for keyword argument" errors.
 
 # Define the source name for this crawler
-# CHANGE THIS: Replace with your crawler name, e.g., "fastapi_docs"
-SOURCE_NAME = "supabase_docs"
+# IMPORTANT: This name MUST match your file name without the "crawl_" prefix and "_docs" suffix
+# Example: For file "crawl_fastapi_docs.py", use SOURCE_NAME = "fastapi_docs"
+# This ensures auto-discovery works correctly and avoids registry issues
+SOURCE_NAME = "pydantic_docs"
 
 # CHANGE THIS: Replace with the base URL for the documentation
-BASE_URL = "https://supabase.com"
+BASE_URL = "https://docs.pydantic.dev/latest/"
 
 def get_urls_to_crawl(url_limit: int = 50) -> List[str]:
     """Get all documentation URLs to crawl.
@@ -80,14 +82,12 @@ def get_urls_to_crawl(url_limit: int = 50) -> List[str]:
     # CUSTOMIZE: Define site-specific fallback URLs to use if sitemap fails
     # These should point to important landing pages for the documentation
     fallback_urls = [
-        f"{BASE_URL}/docs/guides/getting-started",
-        f"{BASE_URL}/docs/guides/database",
-        f"{BASE_URL}/docs/guides/auth",
-        f"{BASE_URL}/docs/guides/storage",
-        f"{BASE_URL}/docs/guides/api",
-        f"{BASE_URL}/docs/guides/functions",
-        f"{BASE_URL}/docs/guides/realtime",
-        f"{BASE_URL}/docs/guides/resources",
+        f"{BASE_URL}/",
+        f"{BASE_URL}/api/base_model/",
+        f"{BASE_URL}/concepts/models/",
+        f"{BASE_URL}/concepts/validators/",
+        f"{BASE_URL}/examples/custom_validators/",
+        # Add more URLs as needed
     ]
     
     # Function to extract URLs from a sitemap - this handles both direct sitemaps and sitemap indexes
@@ -137,7 +137,7 @@ def get_urls_to_crawl(url_limit: int = 50) -> List[str]:
                 for nested_sitemap in sitemap_urls:
                     # CUSTOMIZE: Filter which nested sitemaps to process based on your site's structure
                     # For example, only process docs-related sitemaps
-                    if '/docs/' in nested_sitemap or 'docs' in nested_sitemap or 'guides' in nested_sitemap or 'reference' in nested_sitemap:
+                    if '/docs/' in nested_sitemap or 'docs' in nested_sitemap:
                         nested_urls = extract_urls_from_sitemap(nested_sitemap, namespace, depth + 1, max_depth)
                         all_page_urls.extend(nested_urls)
             
@@ -194,12 +194,9 @@ def get_urls_to_crawl(url_limit: int = 50) -> List[str]:
     # Modify these filters based on your site's URL structure
     filtered_urls = []
     for url in all_urls:
-        # Include URLs with /docs/ path and exclude any unnecessary pages
-        if '/docs/' in url and not any(exclude in url for exclude in [
-            '/archive/', 
-            '/legacy/',
-            '/draft/',
-        ]):
+        # For Pydantic, URLs are directly under /latest/ without a /docs/ path
+        # Include all URLs from the main documentation site
+        if 'pydantic.dev/latest/' in url:
             filtered_urls.append(url)
     
     # Deduplicate URLs while preserving order

@@ -3,7 +3,7 @@ from pydantic_ai.models.openai import OpenAIModel
 from pydantic_ai import Agent, RunContext
 from langgraph.graph import StateGraph, START, END
 from langgraph.checkpoint.memory import MemorySaver
-from typing import TypedDict, Annotated, List, Any
+from typing import TypedDict, Annotated, List, Any, Dict, Optional, Tuple
 from langgraph.config import get_stream_writer
 from langgraph.types import interrupt
 from dotenv import load_dotenv
@@ -12,18 +12,36 @@ from supabase import Client
 import logfire
 import os
 import sys
-
-# Import the message classes from Pydantic AI
+from enum import Enum
+import asyncio
+import json
+import logging
+import time
+from archon.pydantic_ai_coder import get_main_prompt
+from archon.supabase_coder import get_main_prompt as get_supabase_prompt
+from supabase import create_client
+from datetime import datetime
+from utils.utils import get_env_var
 from pydantic_ai.messages import (
     ModelMessage,
+    ModelRequest,
+    ModelResponse,
+    SystemPromptPart,
+    UserPromptPart,
+    TextPart,
+    ToolCallPart,
+    ToolReturnPart,
+    RetryPromptPart,
     ModelMessagesTypeAdapter
 )
+
+# Import the crawler registry for document retrieval
+from archon.crawler_registry import get_enabled_crawlers, get_crawler
 
 # Add the parent directory to Python path
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 from archon.pydantic_ai_coder import pydantic_ai_coder, PydanticAIDeps, list_documentation_pages_helper
 from archon.supabase_coder import supabase_coder, SupabaseDeps
-from utils.utils import get_env_var
 
 # Load environment variables
 load_dotenv()
@@ -88,88 +106,144 @@ class AgentState(TypedDict):
     scope: str
     agent_type: str = "Pydantic AI Agent"  # Default to Pydantic AI Agent if not specified
 
+# Use the registry to dynamically generate the DocumentType enum
+from archon.crawler_registry import generate_document_type_enum
+
+# Use the generated enum code
+exec(generate_document_type_enum())
+
 # Scope Definition Node with Reasoner LLM
 async def define_scope_with_reasoner(state: AgentState):
     # Get the agent type from the state
-    agent_type = state.get('agent_type', 'Pydantic AI Agent')
+    agent_type = state.get("agent_type", "Pydantic AI Agent")
     
-    # Enhanced logging
-    print(f"\n====================================================")
-    print(f"[AGENT SELECTION] Using agent type: {agent_type}")
-    print(f"====================================================\n")
+    # Get the user message
+    message = state["latest_user_message"]
     
-    # First, get the documentation pages so the reasoner can decide which ones are necessary
-    documentation_pages = []
+    # Initialize OpenAI client
+    client = AsyncOpenAI(
+        api_key=get_env_var("OPENAI_API_KEY"),
+    )
     
-    if agent_type == "Pydantic AI Agent":
-        # Get Pydantic AI documentation pages
-        print(f"[DOCUMENTATION] Retrieving Pydantic AI documentation pages")
-        documentation_pages = await list_documentation_pages_helper(supabase)
-        source_filter = "pydantic_ai_docs"
-        print(f"[DOCUMENTATION] Using source filter: {source_filter}")
-    else:  # Supabase Agent
-        # Get Supabase documentation pages
-        print(f"[DOCUMENTATION] Retrieving Supabase documentation pages")
-        from archon.supabase_coder import list_documentation_pages_helper as supabase_list_docs
-        documentation_pages = await supabase_list_docs(supabase)
-        source_filter = "supabase_docs"
-        print(f"[DOCUMENTATION] Using source filter: {source_filter}")
-        
-    documentation_pages_str = "\n".join(documentation_pages)
-
-    # Select the appropriate reasoner based on agent type
-    reasoner = pydantic_reasoner if agent_type == "Pydantic AI Agent" else supabase_reasoner
+    # Get relevant documentation based on agent type
+    doc_pages = []
     
-    # Customize prompt based on agent type
-    if agent_type == "Pydantic AI Agent":
+    # Use the registry to get the correct crawler
+    if "Pydantic" in agent_type:
+        crawler = get_crawler("pydantic")
+        if crawler and crawler.list_documentation_pages_helper:
+            doc_pages = await crawler.list_documentation_pages_helper()
+            source_filter = crawler.source_name
+    elif "Supabase" in agent_type:
+        crawler = get_crawler("supabase")
+        if crawler and crawler.list_documentation_pages_helper:
+            doc_pages = await crawler.list_documentation_pages_helper()
+            source_filter = crawler.source_name
+    elif "FastAPI" in agent_type:
+        crawler = get_crawler("fastapi")
+        if crawler and crawler.list_documentation_pages_helper:
+            doc_pages = await crawler.list_documentation_pages_helper()
+            source_filter = crawler.source_name
+    else:
+        # For any other agent type, try to extract the name and look up in registry
+        agent_name = agent_type.lower().split()[0]  # e.g., "FastAPI" from "FastAPI Agent"
+        crawler = get_crawler(agent_name)
+        if crawler and crawler.list_documentation_pages_helper:
+            doc_pages = await crawler.list_documentation_pages_helper()
+            source_filter = crawler.source_name
+        else:
+            # Fallback to no documentation
+            doc_pages = []
+            source_filter = None
+    
+    # Log the documentation pages
+    logging.info(f"Retrieved {len(doc_pages)} documentation pages for {agent_type}")
+    
+    # Construct prompt for the reasoner
+    if "Pydantic" in agent_type:
         prompt = f"""
-        User AI Agent Request: {state['latest_user_message']}
+        I will give you a task or question. Your job is to create a detailed scope document for how to build a solution using Pydantic.
         
-        Create detailed scope document for the AI agent including:
-        - Architecture diagram
-        - Core components
-        - External dependencies
-        - Testing strategy
-
-        Also based on these Pydantic AI documentation pages available:
-
-        {documentation_pages_str}
-
-        Include a list of documentation pages that are relevant to creating this agent for the user in the scope document.
+        For the task, create a scope document that includes:
+        1. Feature requirements
+        2. Pydantic models with all fields and validators needed
+        3. Functions that would process these models
+        4. Any utility code needed
+        5. API design if applicable
+        
+        Available documentation pages: {len(doc_pages)} pages from the Pydantic documentation.
+        
+        User question:
+        {message}
         """
-    else:  # Supabase Agent
+    elif "Supabase" in agent_type:
         prompt = f"""
-        User Supabase Application Request: {state['latest_user_message']}
+        I will give you a task or question. Your job is to create a detailed scope document for how to build a solution using Supabase.
         
-        Create detailed scope document for the Supabase application including:
-        - Architecture diagram
-        - Database schema design
-        - API endpoints
-        - Authentication flow
-        - Frontend components (if applicable)
-        - External dependencies
-        - Testing strategy
-
-        Also based on these Supabase documentation pages available:
-
-        {documentation_pages_str}
-
-        Include a list of documentation pages that are relevant to creating this application for the user in the scope document.
+        For the task, create a scope document that includes:
+        1. Database tables with all columns and relationships
+        2. API endpoints using Supabase that should be created
+        3. Authentication and authorization approach
+        4. Any frontend component requirements
+        5. Integration plan with other services if applicable
+        
+        Available documentation pages: {len(doc_pages)} pages from the Supabase documentation.
+        
+        User question:
+        {message}
         """
-
-    result = await reasoner.run(prompt)
-    scope = result.data
-
-    # Get the directory one level up from the current file
-    current_dir = os.path.dirname(os.path.abspath(__file__))
-    parent_dir = os.path.dirname(current_dir)
-    scope_path = os.path.join(parent_dir, "workbench", "scope.md")
-    os.makedirs(os.path.join(parent_dir, "workbench"), exist_ok=True)
-
-    with open(scope_path, "w", encoding="utf-8") as f:
-        f.write(scope)
+    elif "FastAPI" in agent_type:
+        prompt = f"""
+        I will give you a task or question. Your job is to create a detailed scope document for how to build a solution using FastAPI.
+        
+        For the task, create a scope document that includes:
+        1. API architecture overview
+        2. Detailed API endpoints with paths, methods, request/response models
+        3. Dependency injection needs
+        4. Database integration approach
+        5. Authentication and middleware requirements
+        6. Testing strategy
+        
+        Available documentation pages: {len(doc_pages)} pages from the FastAPI documentation.
+        
+        User question:
+        {message}
+        """
+    else:
+        # For any other agent type
+        prompt = f"""
+        I will give you a task or question. Your job is to create a detailed scope document for how to build a solution.
+        
+        For the task, create a scope document that includes:
+        1. Feature requirements
+        2. Architecture overview
+        3. Component breakdown
+        4. Implementation strategy
+        5. Testing approach
+        
+        Available documentation pages: {len(doc_pages)} pages from the documentation.
+        
+        User question:
+        {message}
+        """
     
-    return {"scope": scope}
+    # Get response from OpenAI
+    response = await client.chat.completions.create(
+        model="gpt-4-turbo",
+        temperature=0,
+        messages=[
+            {"role": "system", "content": "You are a technical architect who specializes in creating detailed scope documents."},
+            {"role": "user", "content": prompt}
+        ]
+    )
+    
+    # Extract the response
+    scope = response.choices[0].message.content
+    
+    # Update state
+    state["scope"] = scope
+    
+    return state
 
 # Coding Node with Feedback Handling
 async def coder_agent(state: AgentState, writer):    
@@ -243,35 +317,77 @@ def get_next_user_message(state: AgentState):
 # Determine if the user is finished creating their AI agent or not
 async def route_user_message(state: AgentState):
     # Get the agent type from the state
-    agent_type = state.get('agent_type', 'Pydantic AI Agent')
+    agent_type = state.get("agent_type", "Pydantic AI Agent")
     
-    # Customize prompt based on agent type
-    if agent_type == "Pydantic AI Agent":
+    # Get the user message
+    message = state["latest_user_message"]
+    
+    # Initialize OpenAI client
+    client = AsyncOpenAI(
+        api_key=get_env_var("OPENAI_API_KEY"),
+    )
+    
+    # Construct prompt for the router
+    if "Pydantic" in agent_type:
         prompt = f"""
-        The user has sent a message: 
+        I've been asked to help with a Pydantic task. Decide whether I should:
+        1. End the conversation and provide information
+        2. Continue the conversation and help code a solution
         
-        {state['latest_user_message']}
-
-        If the user wants to end the conversation about creating a Pydantic AI agent, respond with just the text "finish_conversation".
-        If the user wants to continue coding the Pydantic AI agent, respond with just the text "coder_agent".
+        User message: {message}
+        
+        Only respond with either "FINISH" or "CONTINUE_CODING".
         """
-    else:  # Supabase Agent
+    elif "Supabase" in agent_type:
         prompt = f"""
-        The user has sent a message: 
+        I've been asked to help with a Supabase task. Decide whether I should:
+        1. End the conversation and provide information
+        2. Continue the conversation and help code a solution
         
-        {state['latest_user_message']}
-
-        If the user wants to end the conversation about creating a Supabase application, respond with just the text "finish_conversation".
-        If the user wants to continue coding the Supabase application, respond with just the text "coder_agent".
+        User message: {message}
+        
+        Only respond with either "FINISH" or "CONTINUE_CODING".
         """
-
-    result = await router_agent.run(prompt)
-    next_action = result.data
-
-    if next_action == "finish_conversation":
-        return "finish_conversation"
+    elif "FastAPI" in agent_type:
+        prompt = f"""
+        I've been asked to help with a FastAPI task. Decide whether I should:
+        1. End the conversation and provide information
+        2. Continue the conversation and help code a FastAPI application
+        
+        User message: {message}
+        
+        Only respond with either "FINISH" or "CONTINUE_CODING".
+        """
     else:
-        return "coder_agent"
+        # Generic prompt for any other agent type
+        agent_name = agent_type.split()[0]  # e.g., "FastAPI" from "FastAPI Agent"
+        prompt = f"""
+        I've been asked to help with a {agent_name} task. Decide whether I should:
+        1. End the conversation and provide information
+        2. Continue the conversation and help code a solution
+        
+        User message: {message}
+        
+        Only respond with either "FINISH" or "CONTINUE_CODING".
+        """
+    
+    # Get response from OpenAI
+    router_agent = await client.chat.completions.create(
+        model="gpt-4-turbo",
+        temperature=0,
+        messages=[
+            {"role": "system", "content": "You are a router that decides whether to end a conversation or continue coding."},
+            {"role": "user", "content": prompt}
+        ]
+    )
+    
+    # Extract the response
+    response = router_agent.choices[0].message.content.strip()
+    
+    if "FINISH" in response:
+        return "finish"
+    else:
+        return "continue_coding"
 
 # End of conversation agent to give instructions for executing the agent
 async def finish_conversation(state: AgentState, writer):    

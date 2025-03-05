@@ -18,6 +18,13 @@ Archon will be developed in iterations, starting with just a simple Pydantic AI 
 all the way to a full agentic workflow using LangGraph that can build other AI agents with any framework.
 Through its iterative development, Archon showcases the power of planning, feedback loops, and domain-specific knowledge in creating robust AI agents.
 
+## Key Features
+
+- **Multiple Agent Types**: Currently supports Pydantic AI, Supabase, and FastAPI agents
+- **Documentation Crawler Registry**: Easy integration of new documentation sources ([Crawler Registry Guide](docs/CRAWLER_REGISTRY_GUIDE.md))
+- **Streamlit UI**: Comprehensive dashboard for interacting with agents and managing documentation
+- **Modular Architecture**: Easily extendable to support new agent types and functionalities
+
 ## Important Links
 
 - The current version of Archon is V4 as mentioned above - see [V4 Documentation](iterations/v4-streamlit-ui-overhaul/README.md) for details.

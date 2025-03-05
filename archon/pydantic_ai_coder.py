@@ -431,3 +431,12 @@ async def get_page_content(ctx: RunContext[PydanticAIDeps], url: str) -> str:
     except Exception as e:
         print(f"Error retrieving page content: {e}")
         return f"Error retrieving page content: {str(e)}"
+
+def get_main_prompt() -> str:
+    """
+    Returns the main system prompt for the Pydantic AI Coder.
+    
+    Returns:
+        str: The system prompt for the Pydantic AI Coder
+    """
+    return system_prompt
